@@ -1,34 +1,36 @@
 # Dependencies
 node_modules/
+backend/node_modules/
+frontend/node_modules/
 
 # Build artifacts
-dist/
+backend/dist/
+backend/build/
+frontend/dist/
+frontend/build/
 
-# Environment variables
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment files (keep .env.example)
 .env
 .env.local
-.env.*
+.env.development
+.env.production
+.env.staging
 
-# IDE and editor settings
+# IDE and editor files
 .vscode/
 .idea/
+*.swp
+*.swo
+*.tmp
 
 # Logs
 *.log
-
-# Temporary files
-*.tmp
-*.swp
-
-# Compiled files
-*.pyc
-__pycache__/
-
-# Processed by esbuild
-backend/node_modules/.bin/esbuild
-
-# Package lock file
-backend/node_modules/.package-lock.json
 
 # OS generated files
 .DS_Store
@@ -37,60 +39,22 @@ Thumbs.db
 # Coverage reports
 coverage/
 htmlcov/
+.coverage
 
-# Python virtual environments
-venv/
-.venv/
-
-# TypeScript build output
+# TypeScript/JavaScript specific
 *.tsbuildinfo
+.next/
+.nuxt/
 
-# Supabase local state (if applicable)
-supabase/.temp/
-supabase/.branches/
-backend/data/bestdel.local-db.json
+# Replit
+.replit
+start.sh
 
-# Generated smoke-test artifacts
-backend/live-fast_research-*.md
-backend/live-fast_research-*.json
-backend/scratch/
+# Lock files (use npm)
+bun.lock
+yarn.lock
+pnpm-lock.yaml
 
-# Vitest cache
-node_modules/.cache/vitest
-
-# Local Supabase config might be in .env files which are already covered
-
-# Additional common ignores
-*.env.local
-.env.production
-.env.development
-*.log
-*.tmp
-.DS_Store
-Thumbs.db
-node_modules/
-coverage/
-.nyc_output/
-.pytest_cache/
-.mypy_cache/
-.hypothesis/
-.vscode/
-.idea/
-dist/
-build/
-*.pyc
-__pycache__/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
-*.log
-*.tmp
-.env
-.env.local
-.env.*
-*.env.*
-
-# Keep safe env templates trackable
-!.env.example
-!backend/.env.example
+# Misc
+attached_assets/
+.vite/

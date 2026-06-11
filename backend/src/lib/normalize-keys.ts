@@ -14,38 +14,31 @@ function cleanEnvValue(v: string | undefined): string | undefined {
   return trimmed;
 }
 
-function unique(values: string[]): string[] {
-  return Array.from(new Set(values));
-}
-
-function splitEnvValues(value: string | undefined): string[] {
-  return value
-    ?.split(",")
+function splitCleanEnvValue(v: string | undefined): string[] {
+  return (v ?? "")
+    .split(",")
     .map((part) => cleanEnvValue(part))
-    .filter((part): part is string => Boolean(part)) ?? [];
+    .filter((part): part is string => Boolean(part));
 }
 
-function pickNumberedEnv(baseNames: string[]): string[] {
-  const numbered: string[] = [];
+function collectEnvValues(baseNames: string[]): string[] {
+  const values: string[] = [];
   for (const baseName of baseNames) {
-    for (let i = 1; i <= 5; i += 1) {
-      numbered.push(...splitEnvValues(process.env[`${baseName}_${i}`]));
+    for (let i = 1; i <= 10; i += 1) {
+      values.push(...splitCleanEnvValue(process.env[`${baseName}_${i}`]));
     }
   }
 
-  if (numbered.length) return unique(numbered);
-
-  const direct: string[] = [];
   for (const baseName of baseNames) {
-    direct.push(...splitEnvValues(process.env[baseName]));
+    values.push(...splitCleanEnvValue(process.env[baseName]));
   }
 
-  return unique(direct);
+  return Array.from(new Set(values));
 }
 
 function promoteEnv(baseName: string, aliases: string[] = []): void {
-  const values = pickNumberedEnv([baseName, ...aliases]);
-  if (values.length) process.env[baseName] = values.join(",");
+  const fallback = collectEnvValues([baseName, ...aliases]).join(",");
+  if (fallback) process.env[baseName] = fallback;
   else delete process.env[baseName];
 }
 
@@ -80,25 +73,24 @@ export function normalizeApiKeys(): void {
   promoteEnvPair("BRAVE_API_KEY", "BRAVE_KEY");
   promoteEnvPair("JINA_API_KEY", "JINA_KEY");
 
-  let a = cleanEnvValue(process.env.ANTHROPIC_API_KEY);
-  const openAiValues = splitEnvValues(process.env.OPENAI_API_KEY);
-  const deepSeekValues = splitEnvValues(process.env.DEEPSEEK_API_KEY);
-
   const looksLikeOpenAI = (v?: string) => !!v && (v.startsWith("sk-svcacct") || v.startsWith("sk-proj-") || (v.startsWith("sk-") && v.length > 80));
   const looksLikeAnthropic = (v?: string) => !!v && v.startsWith("sk-ant-");
   const looksLikeDeepSeek = (v?: string) => !!v && /^sk-[a-f0-9]{20,40}$/i.test(v);
 
-  const o = unique([...openAiValues, ...deepSeekValues.filter(looksLikeOpenAI)]).filter(looksLikeOpenAI);
-  const d = unique([...deepSeekValues, ...openAiValues.filter(looksLikeDeepSeek)]).filter(looksLikeDeepSeek);
-
-  if (a && !looksLikeAnthropic(a)) {
-    a = undefined;
-  }
+  const a = splitCleanEnvValue(process.env.ANTHROPIC_API_KEY).filter(looksLikeAnthropic).join(",");
+  const o = [
+    ...splitCleanEnvValue(process.env.OPENAI_API_KEY).filter(looksLikeOpenAI),
+    ...splitCleanEnvValue(process.env.DEEPSEEK_API_KEY).filter(looksLikeOpenAI),
+  ].join(",");
+  const d = [
+    ...splitCleanEnvValue(process.env.DEEPSEEK_API_KEY).filter(looksLikeDeepSeek),
+    ...splitCleanEnvValue(process.env.OPENAI_API_KEY).filter(looksLikeDeepSeek),
+  ].join(",");
 
   if (a) process.env.ANTHROPIC_API_KEY = a;
   else delete process.env.ANTHROPIC_API_KEY;
-  if (o.length) process.env.OPENAI_API_KEY = o.join(",");
+  if (o) process.env.OPENAI_API_KEY = o;
   else delete process.env.OPENAI_API_KEY;
-  if (d.length) process.env.DEEPSEEK_API_KEY = d.join(",");
+  if (d) process.env.DEEPSEEK_API_KEY = d;
   else delete process.env.DEEPSEEK_API_KEY;
 }

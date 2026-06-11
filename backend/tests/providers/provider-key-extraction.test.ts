@@ -72,20 +72,22 @@ test("extractProviderKeys supports server env fallback", () => {
   assert.equal(keys.hfToken, "hf-env");
 });
 
-test("extractProviderKeys joins numbered fallback keys in priority order", () => {
+test("extractProviderKeys joins numbered rollback keys for multi-key fallback", () => {
   const keys = extractProviderKeys({ headers: {} }, {
     GROQ_API_KEY_1: "gsk-env-1",
     GROQ_API_KEY_2: "gsk-env-2",
     OPENROUTER_API_KEY_1: "or-env-1",
+    OPENROUTER_API_KEY_2: "or-env-2",
     TAVILY_API_KEY_1: "tvly-env-1",
     TAVILY_API_KEY_2: "tvly-env-2",
     FIRECRAWL_API_KEY_1: "fc-env-1",
+    FIRECRAWL_API_KEY_2: "fc-env-2",
   } as ProviderKeyEnv);
 
   assert.equal(keys.groqKey, "gsk-env-1,gsk-env-2");
-  assert.equal(keys.openrouterKey, "or-env-1");
+  assert.equal(keys.openrouterKey, "or-env-1,or-env-2");
   assert.equal(keys.tavilyKey, "tvly-env-1,tvly-env-2");
-  assert.equal(keys.firecrawlKey, "fc-env-1");
+  assert.equal(keys.firecrawlKey, "fc-env-1,fc-env-2");
 });
 
 test("extractProviderKeys ignores placeholder rollback values", () => {

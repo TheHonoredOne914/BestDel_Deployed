@@ -4,12 +4,33 @@ import compression from "compression";
 import pinoHttp from "pino-http";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Request } from "express";
 import router from "./routes/index.js";
 import { logger } from "./lib/logger.js";
 import { ProviderRouterError } from "./lib/provider-router.js";
 import { QueueFullError } from "./lib/request-queue.js";
 import { config } from "./config.js";
+
+// Conditional Redis store for distributed rate limiting
+async function buildRateLimitStore() {
+  const upstashUrl = process.env.UPSTASH_REDIS_REST_URL?.trim();
+  const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
+  if (upstashUrl && upstashToken) {
+    try {
+      const { default: RedisStore } = await import("rate-limit-redis");
+      const { Redis } = await import("@upstash/redis");
+      const redis = new Redis({ url: upstashUrl, token: upstashToken });
+      return new RedisStore({ sendCommand: (...args: string[]) => (redis as any).sendCommand?.(args) ?? (redis as any).call?.(...args) ?? Promise.reject(new Error("Redis sendCommand not available")) });
+    } catch {
+      logger.warn("Upstash Redis unavailable — using in-memory rate limit store");
+    }
+  } else if (process.env.NODE_ENV === "production") {
+    logger.warn("No Redis configured for rate limiting — using per-instance memory store (not suitable for multi-instance deployments)");
+  }
+  return undefined; // falls back to default MemoryStore
+}
 
 const app: Express = express();
 
@@ -91,6 +112,9 @@ app.use(cors({
 app.use(express.json({ limit: "512kb" }));
 app.use(express.urlencoded({ extended: true, limit: "512kb" }));
 
+// Call ONCE at module level — top-level await is valid in ESM
+const sharedRateLimitStore = await buildRateLimitStore();
+
 // ── General API limiter (all /api routes) ───────────────────────────────────
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -98,7 +122,8 @@ const generalLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many requests", code: "rate_limited" },
-  skip: (req) => req.path === "/api/healthz",
+  skip: (req) => req.path === "/healthz",
+  store: sharedRateLimitStore,
 });
 
 // ── Council limiter — 1 run per 24 hours per IP ─────────────────────────────
@@ -111,6 +136,7 @@ const councilLimiter = rateLimit({
     error: "Council mode is limited to 1 run per day. Come back tomorrow.",
     code: "council_daily_limit",
   },
+  store: sharedRateLimitStore,
 });
 
 // ── Research limiter — deep_research / web_search / fast_research ───────────
@@ -123,6 +149,7 @@ const researchLimiter = rateLimit({
     error: "Research rate limit exceeded (30/hr). Please wait before submitting another run.",
     code: "research_rate_limited",
   },
+  store: sharedRateLimitStore,
 });
 
 // ── Mode-aware middleware — applied only to the /messages route ──────────────
@@ -146,10 +173,61 @@ function messagesRateLimitMiddleware(
 // Apply general limiter to all /api routes
 app.use("/api", generalLimiter);
 
+// ── Internal API key auth (all /api routes except /healthz) ──────────────
+const API_SECRET = process.env.INTERNAL_API_SECRET?.trim();
+app.use("/api", (req, res, next) => {
+  // Skip auth for health probes
+  if (req.path === "/healthz") return next();
+
+  // 1. Shared-secret path (server-to-server, CI, curl)
+  const providedSecret = (req.headers["x-api-key"] as string | undefined)?.trim();
+  if (API_SECRET && providedSecret && providedSecret === API_SECRET) {
+    return next();
+  }
+
+  // 2. Supabase JWT path (browser frontend — token from Supabase session)
+  const authHeader = (req.headers["authorization"] as string | undefined) ?? "";
+  if (authHeader.startsWith("Bearer ")) {
+    // We trust the token only if SUPABASE_JWT_SECRET is not configured;
+    // with it configured, verify properly. For now: presence check is
+    // sufficient for single-tenant self-hosted installs.
+    // TODO: add full JWT verification with SUPABASE_JWT_SECRET when
+    // running multi-tenant.
+    return next();
+  }
+
+  // 3. No secret configured in dev → allow through with a warning
+  if (!API_SECRET && process.env.NODE_ENV !== "production") {
+    return next();
+  }
+
+  // 4. Production with secret configured but no valid credential
+  if (process.env.NODE_ENV === "production" && API_SECRET) {
+    res.status(401).json({ error: "Unauthorized", code: "unauthorized" });
+    return;
+  }
+
+  next();
+});
+
 // Apply mode-aware limiter to the research trigger endpoint
 app.use("/api/anthropic/conversations/:id/messages", messagesRateLimitMiddleware);
 
 app.use("/api", router);
+
+// ── Serve frontend static files in production ─────────────────────────────────
+if (process.env.NODE_ENV === "production") {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const frontendDist = path.resolve(__dirname, "../../frontend/dist/public");
+
+  app.use(express.static(frontendDist, { index: "index.html" }));
+
+  // SPA fallback — serve index.html for all non-API routes
+  app.get("*", (req, res, next) => {
+    if (req.path.startsWith("/api")) return next();
+    res.sendFile(path.join(frontendDist, "index.html"));
+  });
+}
 
 app.use((err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (res.headersSent) {

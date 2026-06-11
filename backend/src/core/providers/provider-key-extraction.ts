@@ -44,17 +44,6 @@ function cleanProviderValue(value: string | undefined | null): string | null {
   return trimmed;
 }
 
-function splitProviderValues(value: string | undefined | null): string[] {
-  return value
-    ?.split(",")
-    .map((part) => cleanProviderValue(part))
-    .filter((part): part is string => Boolean(part)) ?? [];
-}
-
-function unique(values: string[]): string[] {
-  return Array.from(new Set(values));
-}
-
 export function extractProviderKeys(req: ProviderKeyRequest, env: ProviderKeyEnv = process.env): RequestKeys {
   const normalizedHeaders = Object.fromEntries(
     Object.entries(req.headers ?? {}).map(([name, value]) => [name.toLowerCase(), value]),
@@ -62,22 +51,29 @@ export function extractProviderKeys(req: ProviderKeyRequest, env: ProviderKeyEnv
   const h = (name: string): string | null => {
     const value = normalizedHeaders[name.toLowerCase()];
     if (!value) return null;
-    const first = Array.isArray(value) ? value[0] : value;
-    const values = splitProviderValues(first);
-    return values.length ? values.join(",") : null;
+    const values = Array.isArray(value) ? value : [value];
+    for (const rawValue of values) {
+      const cleaned = rawValue
+        .split(",")
+        .map(v => cleanProviderValue(v))
+        .filter((v): v is string => Boolean(v));
+      if (cleaned.length > 0) return Array.from(new Set(cleaned)).join(",");
+    }
+    return null;
   };
 
   const getEnvKey = (baseName: string): string | null => {
-    const numbered: string[] = [];
-    for (let i = 1; i <= 5; i++) {
+    const keys: string[] = [];
+    for (let i = 1; i <= 10; i++) {
       const val = (env as Record<string, string | undefined>)[`${baseName}_${i}`];
-      numbered.push(...splitProviderValues(val));
+      keys.push(...(val ?? "").split(",").map(k => cleanProviderValue(k)).filter((k): k is string => Boolean(k)));
     }
 
-    if (numbered.length) return unique(numbered).join(",");
+    const baseVal = (env as Record<string, string | undefined>)[baseName];
+    keys.push(...(baseVal ?? "").split(",").map(k => cleanProviderValue(k)).filter((k): k is string => Boolean(k)));
 
-    const direct = splitProviderValues((env as Record<string, string | undefined>)[baseName]);
-    return direct.length ? unique(direct).join(",") : null;
+    const uniqueKeys = Array.from(new Set(keys));
+    return uniqueKeys.length > 0 ? uniqueKeys.join(",") : null;
   };
 
   return {

@@ -14,8 +14,8 @@ export async function buildSearchProviderStatus(
   const now = options.now ?? Date.now();
   const cached = statusCache.get(cacheKey);
   if (!options.bypassCache && cached && cached.expiresAt > now) return cached.payload;
-  const providers = [...allSearchProviders(), ...allExtractorProviders()];
   const fetchFn = options.fetchFn ?? multiKeyFetch;
+  const providers = [...allSearchProviders(), ...allExtractorProviders()];
   const settled = await Promise.allSettled(providers.map(async (provider) => {
     try {
       const health = provider.healthCheck

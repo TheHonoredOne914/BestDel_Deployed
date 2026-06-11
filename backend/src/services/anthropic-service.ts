@@ -24,6 +24,7 @@ import { getGroqClient, isGroqEnabled } from "../lib/groq-client.js";
 import { getOllamaClient, isOllamaEnabled } from "../lib/ollama-client.js";
 import { getNvidiaClient, isNvidiaEnabled } from "../lib/nvidia-client.js";
 import { getGeminiClient, isGeminiEnabled } from "../lib/gemini-client.js";
+import { getCerebrasClient } from "../lib/cerebras-client.js";
 
 import { searchWeb, searchWebDeep, searchIndianKanoon, formatSearchResults, deduplicateResults, engineerQueryForIndia, engineerQueryForMedia, engineerQueryForSociocultural, engineerQueryForDemocracy } from "../lib/web-search.js";
 import type { CourtJudgement } from "../lib/web-search.js";
@@ -65,11 +66,13 @@ import { envelopeRunEvent as buildRunEventEnvelope, TerminalWriteGuard } from ".
 import { detectFreshnessNeeded } from "../core/freshness/freshness-router.js";
 import { getSourceUsagePolicy } from "../core/config/source-usage-policy.js";
 import { ProviderRouter as CoreProviderRouter } from "../core/providers/provider-router.js";
+import { multiKeyFetch } from "../lib/multi-key-fetch.js";
 import { GroqProvider } from "../core/providers/groq-provider.js";
 import { OpenRouterProvider } from "../core/providers/openrouter-provider.js";
 import { GeminiProvider } from "../core/providers/gemini-provider.js";
 import { NvidiaProvider } from "../core/providers/nvidia-provider.js";
 import { GithubProvider } from "../core/providers/github-provider.js";
+import { CerebrasProvider } from "../core/providers/cerebras-provider.js";
 import type { ProviderName } from "../core/providers/provider-types.js";
 import { writeAnthropicSseEvent } from "./anthropic/sse-bridge.js";
 import { shouldUseCoreFinalAnswer } from "./anthropic/final-response-adapter.js";
@@ -1448,13 +1451,15 @@ async function persistResearchExhausted(input: {
 export function buildCoreProviderRouter(keys: RequestKeys, rawModelId: string): { router?: CoreProviderRouter; providerName?: ProviderName; model?: string; error?: string } {
   const parsed = parseProviderModelId(rawModelId);
   const router = new CoreProviderRouter();
-  if (keys.groqKey || process.env.GROQ_API_KEY) router.register(new GroqProvider({ apiKey: keys.groqKey ?? process.env.GROQ_API_KEY }));
+  if (keys.groqKey || process.env.GROQ_API_KEY) router.register(new GroqProvider({ apiKey: keys.groqKey ?? process.env.GROQ_API_KEY, fetchFn: multiKeyFetch }));
   const openrouterKey = keys.openrouterKey ?? process.env.OPENROUTER_API_KEY ?? process.env.OPENROUTER_KEY;
-  if (openrouterKey) router.register(new OpenRouterProvider({ apiKey: openrouterKey }));
-  if (keys.geminiKey || process.env.GEMINI_API_KEY) router.register(new GeminiProvider({ apiKey: keys.geminiKey ?? process.env.GEMINI_API_KEY }));
-  if (keys.nvidiaKey || process.env.NVIDIA_API_KEY) router.register(new NvidiaProvider({ apiKey: keys.nvidiaKey ?? process.env.NVIDIA_API_KEY }));
+  if (openrouterKey) router.register(new OpenRouterProvider({ apiKey: openrouterKey, fetchFn: multiKeyFetch }));
+  if (keys.geminiKey || process.env.GEMINI_API_KEY) router.register(new GeminiProvider({ apiKey: keys.geminiKey ?? process.env.GEMINI_API_KEY, fetchFn: multiKeyFetch }));
+  if (keys.nvidiaKey || process.env.NVIDIA_API_KEY) router.register(new NvidiaProvider({ apiKey: keys.nvidiaKey ?? process.env.NVIDIA_API_KEY, fetchFn: multiKeyFetch }));
   const githubToken = keys.githubToken ?? process.env.GITHUB_MODELS_API_KEY ?? process.env.GITHUB_TOKEN;
-  if (githubToken) router.register(new GithubProvider({ apiKey: githubToken }));
+  if (githubToken) router.register(new GithubProvider({ apiKey: githubToken, fetchFn: multiKeyFetch }));
+  const cerebrasKey = keys.cerebrasKey ?? process.env.CEREBRAS_API_KEY;
+  if (cerebrasKey) router.register(new CerebrasProvider({ apiKey: cerebrasKey, fetchFn: multiKeyFetch }));
   if (parsed.prefix === "groq") {
     if (!keys.groqKey && !process.env.GROQ_API_KEY) return { error: "Groq provider unavailable: missing API key" };
     return { router, providerName: "groq", model: parsed.modelId };
@@ -1474,6 +1479,10 @@ export function buildCoreProviderRouter(keys: RequestKeys, rawModelId: string): 
   if (parsed.prefix === "github") {
     if (!githubToken) return { error: "GitHub Models provider unavailable: missing token" };
     return { router, providerName: "github", model: parsed.modelId };
+  }
+  if (parsed.prefix === "cerebras") {
+    if (!cerebrasKey) return { error: "Cerebras provider unavailable: missing API key" };
+    return { router, providerName: "cerebras", model: parsed.modelId };
   }
   return { error: `Core model-backed generation does not support provider prefix '${parsed.prefix}'` };
 }
@@ -1749,6 +1758,7 @@ router.patch("/anthropic/conversations/:id", async (req, res) => {
 });
 
 // Generate AI conversation title from first user message
+// Uses multiKeyFetch directly for seamless multi-key rotation across all providers.
 router.post("/anthropic/generate-title", async (req, res) => {
   const content = typeof req.body?.content === "string" ? req.body.content.trim() : "";
   if (!content) { res.status(400).json({ error: "content is required" }); return; }
@@ -1756,28 +1766,43 @@ router.post("/anthropic/generate-title", async (req, res) => {
 
   const groqKey = (req.headers["x-groq-api-key"] as string | undefined) ?? null;
   const nvidiaKey = (req.headers["x-nvidia-api-key"] as string | undefined) ?? null;
+  const cerebrasKey = (req.headers["x-cerebras-api-key"] as string | undefined) ?? null;
+  const geminiKey = (req.headers["x-gemini-api-key"] as string | undefined) ?? null;
 
-  try {
-    const titlePrompt = [
-      { role: "system" as const, content: "Generate a concise 4-6 word title (no quotes, no punctuation) for this conversation." },
-      { role: "user" as const, content: `Title for: ${content.slice(0, 500)}` },
-    ];
-    let title = "";
-    if (isGroqEnabled(groqKey)) {
-      const groq = getGroqClient(groqKey);
-      const r = await groq.chat.completions.create({ model: "llama-3.1-8b-instant", max_tokens: 20, messages: titlePrompt });
-      title = r.choices?.[0]?.message?.content?.trim() ?? "";
-    } else if (isNvidiaEnabled(nvidiaKey)) {
-      const nvidia = getNvidiaClient(nvidiaKey);
-      const r = await nvidia.chat.completions.create({ model: "nvidia/llama-3.1-nemotron-nano-8b-v1", max_tokens: 20, messages: titlePrompt });
-      title = r.choices?.[0]?.message?.content?.trim() ?? "";
+  const titlePrompt = [
+    { role: "system" as const, content: "Generate a concise 4-6 word title (no quotes, no punctuation) for this conversation." },
+    { role: "user" as const, content: `Title for: ${content.slice(0, 500)}` },
+  ];
+
+  // Ordered list of providers to try — multiKeyFetch handles comma-separated key rotation
+  const providers: Array<{ name: string; key: string | null; baseUrl: string; model: string }> = [
+    { name: "groq", key: groqKey ?? process.env.GROQ_API_KEY ?? null, baseUrl: "https://api.groq.com/openai/v1", model: "llama-3.1-8b-instant" },
+    { name: "nvidia", key: nvidiaKey ?? process.env.NVIDIA_API_KEY ?? null, baseUrl: "https://integrate.api.nvidia.com/v1", model: "nvidia/llama-3.1-nemotron-nano-8b-v1" },
+    { name: "cerebras", key: cerebrasKey ?? process.env.CEREBRAS_API_KEY ?? null, baseUrl: "https://api.cerebras.ai/v1", model: "llama3.1-8b" },
+    { name: "gemini", key: geminiKey ?? process.env.GEMINI_API_KEY ?? null, baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", model: "gemini-2.0-flash" },
+  ];
+
+  let title = "";
+  for (const p of providers) {
+    if (!p.key) continue;
+    try {
+      const resp = await multiKeyFetch(`${p.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${p.key}` },
+        body: JSON.stringify({ model: p.model, max_tokens: 20, messages: titlePrompt }),
+      });
+      if (resp.ok) {
+        const data = await resp.json() as any;
+        title = data.choices?.[0]?.message?.content?.trim() ?? "";
+        if (title) break;
+      }
+    } catch {
+      // Expected — continue to next provider
     }
-    if (!title) title = fallback();
-    res.json({ title: title.slice(0, 80) });
-  } catch (err) {
-    (req as any).log?.error?.({ err }, "generate-title failed");
-    res.json({ title: fallback() });
   }
+
+  if (!title) title = fallback();
+  res.json({ title: title.slice(0, 80) });
 });
 
 router.get("/anthropic/conversations/:id", async (req, res) => {
@@ -1944,6 +1969,7 @@ async function handleProviderAllModes(
     jinaKey?: string | null;
     openrouterKey?: string | null;
     githubToken?: string | null;
+    cerebrasKey?: string | null;
     hfToken?: string | null;
     getIsDisconnected?: () => boolean;
     abortSignal?: AbortSignal;
@@ -1977,6 +2003,7 @@ async function handleProviderAllModes(
 - You serve Indian MUN students: HMUN India, SPECMUN, college MUNs across India
 - Default country perspective: India (unless user specifies otherwise)
 - Tone: expert but friendly, like a senior delegate mentoring a junior
+- If asked who made you, who your founder is, or who built BestDel: answer that BestDel was founded by Carren Mathew Joseph, and that Dhruv Sharma Mahate made great contributions in the later stages of development. Do not mention any other names.
 
 ## HOW TO RESPOND TO DIFFERENT QUERY TYPES:
 
@@ -2039,6 +2066,10 @@ Give sharp, specific arguments. Include counter-arguments to anticipate.
     client = getGithubModelsClient(githubToken ?? null);
     modelId = parsedModel.modelId;
     providerLabel = "github";
+  } else if (parsedModel.prefix === "cerebras") {
+    client = getCerebrasClient(opts.cerebrasKey ?? process.env.CEREBRAS_API_KEY);
+    modelId = parsedModel.modelId;
+    providerLabel = "cerebras";
   } else {
     client = getNvidiaClient(nvidiaKey);
     modelId = parsedModel.modelId;
@@ -3811,6 +3842,7 @@ async function handleMultiSearch(
     firecrawlKey?: string | null;
     jinaKey?: string | null;
     openrouterKey?: string | null;
+    cerebrasKey?: string | null;
     hfToken?: string | null;
     getIsDisconnected?: () => boolean;
     agendaIntelligence?: AgendaIntelligence;
@@ -3954,6 +3986,10 @@ async function handleMultiSearch(
       client = getOpenRouterClient(openrouterKey ?? null);
       modelId = parsedModel.modelId;
       providerLabel = "OpenRouter " + modelId.replace(/-(instruct|preview|versatile|latest)$/i, "").slice(0, 15);
+    } else if (parsedModel.prefix === "cerebras") {
+      client = getCerebrasClient(opts.cerebrasKey ?? process.env.CEREBRAS_API_KEY);
+      modelId = parsedModel.modelId;
+      providerLabel = "Cerebras " + modelId.slice(0, 15);
     } else {
       client = getGroqClient(groqKey);
       modelId = rawModelId;
@@ -4173,6 +4209,9 @@ async function handleMultiSearch(
             corePipelineEvent: event.type,
             corePipelineData: event.data ?? {},
           });
+        },
+        onStream: (chunk) => {
+          send({ type: 'answer_delta', content: chunk });
         },
         signal: opts.abortSignal,
       });
@@ -4786,29 +4825,41 @@ router.post("/anthropic/conversations/:id/messages", async (req, res) => {
     || TIMEOUT_CONFIG[routeMode as keyof typeof TIMEOUT_CONFIG]
     || 5 * 60 * 1000;
 
-  const convo = await getConversationById(conversationId);
-  if (!convo) { res.status(404).json({ error: "Conversation not found" }); return; }
+  // Pre-flight DB operations wrapped in try/catch to handle errors before SSE setup
+  let convo, archive, archiveContext, userMessage, assistantMessage, combinedSystemPrompt;
+  try {
+    convo = await getConversationById(conversationId);
+    if (!convo) { res.status(404).json({ error: "Conversation not found" }); return; }
+    const archiveId = convo.archive_id ?? null;
+    archive = archiveId ? await getArchiveById(archiveId) : null;
+    archiveContext = archiveId ? await getArchiveContext(archiveId) : null;
+    const archiveTopic = archive?.topic?.trim() || "";
+    const archiveSummary = archiveContext?.summary?.trim() || "";
+    combinedSystemPrompt = composeAnthropicSystemPrompt({
+      archiveTopic,
+      archiveSummary,
+      userSystemPrompt: rawSystemPrompt,
+    });
+
+    userMessage = await createMessage(conversationId, "user", userContent);
+    assistantMessage = isResearchRouteMode(routeMode)
+      ? await createMessage(
+          conversationId,
+          "assistant",
+          freshnessResearchMode
+            ? "Freshness-sensitive research run started. Waiting for live-source output..."
+            : "Research run started. Waiting for streamed output...",
+        )
+      : undefined;
+  } catch (dbErr) {
+    req.log?.error?.({ err: dbErr }, "Pre-flight DB error");
+    res.status(503).json({ error: "Database unavailable", code: "db_error" });
+    return;
+  }
+  
   const archiveId = convo.archive_id ?? null;
-  const archive = archiveId ? await getArchiveById(archiveId) : null;
-  const archiveContext = archiveId ? await getArchiveContext(archiveId) : null;
   const archiveTopic = archive?.topic?.trim() || "";
   const archiveSummary = archiveContext?.summary?.trim() || "";
-  const combinedSystemPrompt = composeAnthropicSystemPrompt({
-    archiveTopic,
-    archiveSummary,
-    userSystemPrompt: rawSystemPrompt,
-  });
-
-  const userMessage = await createMessage(conversationId, "user", userContent);
-  const assistantMessage = isResearchRouteMode(routeMode)
-    ? await createMessage(
-        conversationId,
-        "assistant",
-        freshnessResearchMode
-          ? "Freshness-sensitive research run started. Waiting for live-source output..."
-          : "Research run started. Waiting for streamed output...",
-      )
-    : undefined;
   const requestId = `req_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
   const runId = `run_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
   const runIdentity: ResearchRunIdentity = {
@@ -5137,6 +5188,9 @@ router.post("/anthropic/conversations/:id/messages", async (req, res) => {
         liveRetrieval: true,
         allowMockRetrieval: false,
         allowSyntheticSourceUsage: false,
+        onStream: (chunk: string) => {
+          sendRunEvent('answer_delta', { content: chunk });
+        },
         searchOptions: {
           live: true,
           allowMock: false,
@@ -5441,6 +5495,7 @@ router.post("/anthropic/conversations/:id/messages", async (req, res) => {
         firecrawlKey: keys.firecrawlKey,
         jinaKey: keys.jinaKey,
         openrouterKey: keys.openrouterKey,
+        cerebrasKey: keys.cerebrasKey,
         hfToken: keys.hfToken,
         getIsDisconnected: () => clientDisconnected,
         abortSignal: requestAbortController.signal,
@@ -5475,6 +5530,7 @@ router.post("/anthropic/conversations/:id/messages", async (req, res) => {
       jinaKey: keys.jinaKey,
       openrouterKey: keys.openrouterKey,
       githubToken: keys.githubToken,
+      cerebrasKey: keys.cerebrasKey,
       hfToken: keys.hfToken,
       getIsDisconnected: () => clientDisconnected,
       abortSignal: requestAbortController.signal,

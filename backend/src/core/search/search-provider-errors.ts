@@ -22,7 +22,7 @@ export function classifyProviderError(error: unknown): SearchProviderStatusValue
   if (/budget exceeded/.test(text)) return "aborted";
   if (name === "AbortError" || /abort|timeout|timed out/.test(text)) return "timeout";
   if (/401|403|unauthorized|forbidden|invalid[_ -]?key/.test(text)) return "invalid_key";
-  if (/429|rate/.test(text)) return "rate_limited";
+  if (/402|429|432|rate|quota|credit|usage limit|plan's set usage limit/.test(text)) return "rate_limited";
   if (/network|fetch failed|enotfound|econn|5\d\d/.test(text)) return "network_error";
   return "unavailable";
 }
@@ -42,7 +42,7 @@ export function redactKnownSecretValues(input: string, secrets: Array<string | n
 
 export function statusFromHttp(status: number): SearchProviderStatusValue {
   if (status === 401 || status === 403) return "invalid_key";
-  if (status === 429) return "rate_limited";
+  if (status === 402 || status === 429 || status === 432) return "rate_limited";
   if (status >= 500) return "network_error";
   return "unavailable";
 }
